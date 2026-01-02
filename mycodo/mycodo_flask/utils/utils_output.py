@@ -14,10 +14,9 @@ from mycodo.databases.models import Output
 from mycodo.databases.models import OutputChannel
 from mycodo.mycodo_client import DaemonControl
 from mycodo.mycodo_flask.extensions import db
-from mycodo.mycodo_flask.utils.utils_general import custom_channel_options_return_json
-from mycodo.mycodo_flask.utils.utils_general import custom_options_return_json
-from mycodo.mycodo_flask.utils.utils_general import delete_entry_with_id
-from mycodo.mycodo_flask.utils.utils_general import return_dependencies
+from mycodo.mycodo_flask.utils.utils_general import (
+    custom_channel_options_return_json, custom_options_return_json,
+    daemon_background_task, delete_entry_with_id, return_dependencies)
 from mycodo.utils.outputs import parse_output_information
 from mycodo.utils.system_pi import is_int
 
@@ -408,19 +407,22 @@ def manipulate_output(action, output_id):
     }
 
     try:
-        control = DaemonControl()
-        return_values = control.output_setup(action, output_id)
-        if return_values and len(return_values) > 1:
-            if return_values[0]:
-                messages["error"].append(gettext("%(err)s",
-                    err='{action} Output: Daemon response: {msg}'.format(
-                        action=action,
-                        msg=return_values[1])))
-            else:
-                messages["success"].append(gettext("%(err)s",
-                    err='{action} Output: Daemon response: {msg}'.format(
-                        action=gettext(action),
-                        msg=return_values[1])))
+        output = Output.query.filter(Output.unique_id == output_id).first()
+        if not output:
+            messages["error"].append(gettext("Output not found."))
+            return messages
+
+        flask_app = current_app._get_current_object()
+        daemon_background_task(
+            flask_app,
+            lambda act, oid: DaemonControl().output_setup(act, oid),
+            gettext("%(err)s", err=f"{action} Output"),
+            action,
+            output_id,
+        )
+        messages["success"].append(
+            gettext("%(err)s",
+                    err=f"{gettext(action)} {TRANSLATIONS['output']['title']} queued"))
     except Exception as msg:
         messages["error"].append(gettext("%(err)s",
             err='{action} Output: Could not connect to Daemon: {error}'.format(

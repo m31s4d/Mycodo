@@ -9,6 +9,7 @@ import resource
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections import OrderedDict
 from importlib import import_module
@@ -60,6 +61,33 @@ blueprint = Blueprint('routes_page',
                       __name__,
                       static_folder='../static',
                       template_folder='../templates')
+
+
+def _stop_stream_and_capture_still(flask_app, camera_id):
+    """
+    Stop an active camera stream (if any) and capture a still frame without
+    blocking the request thread. Runs within its own application context.
+    """
+    with flask_app.app_context():
+        mod_camera = Camera.query.filter(Camera.unique_id == camera_id).first()
+        if not mod_camera:
+            logger.error("Camera with ID %s not found for still capture", camera_id)
+            return
+
+        if mod_camera.stream_started:
+            try:
+                camera_stream = import_module(
+                    'mycodo.mycodo_flask.camera.camera_{lib}'.format(
+                        lib=mod_camera.library)).Camera
+                if camera_stream(unique_id=mod_camera.unique_id).is_running(mod_camera.unique_id):
+                    camera_stream(unique_id=mod_camera.unique_id).stop(mod_camera.unique_id)
+                time.sleep(2)
+            except Exception:
+                logger.exception("Error stopping camera stream before still capture")
+
+        path, filename = camera_record('photo', mod_camera.unique_id)
+        if not path and not filename:
+            logger.error("Could not acquire image for camera %s", mod_camera.unique_id)
 
 
 @blueprint.context_processor
@@ -177,25 +205,20 @@ def page_camera():
 
         mod_camera = Camera.query.filter(
             Camera.unique_id == form_camera.camera_id.data).first()
+        if not mod_camera:
+            flash(gettext("Camera not found."), "error")
+            return redirect(url_for('routes_page.page_camera'))
         if form_camera.camera_add.data:
             unmet_dependencies = utils_camera.camera_add(form_camera)
         elif form_camera.capture_still.data:
-            # If a stream is active, stop the stream to take a photo
-            if mod_camera.stream_started:
-                try:
-                    camera_stream = import_module(
-                        'mycodo.mycodo_flask.camera.camera_{lib}'.format(
-                            lib=mod_camera.library)).Camera
-                    if camera_stream(unique_id=mod_camera.unique_id).is_running(mod_camera.unique_id):
-                        camera_stream(unique_id=mod_camera.unique_id).stop(mod_camera.unique_id)
-                    time.sleep(2)
-                except Exception as err:
-                    flash(f"Error stopping stream: {err}", "error")
-            path, filename = camera_record('photo', mod_camera.unique_id)
-            if not path and not filename:
-                msg = "Could not acquire image."
-                flash(msg, "error")
-                logger.error(msg)
+            capture_thread = threading.Thread(
+                target=_stop_stream_and_capture_still,
+                args=(current_app._get_current_object(), mod_camera.unique_id),
+                daemon=True,
+            )
+            capture_thread.start()
+            flash(gettext("Still capture initiated in background."), "success")
+            return redirect(url_for('routes_page.page_camera'))
         elif form_camera.start_timelapse.data:
             error = []
             if mod_camera.stream_started:

@@ -4,12 +4,13 @@ import importlib
 import json
 import logging
 import os
+import threading
 from collections import OrderedDict
 from datetime import datetime
 
 import flask_login
 import sqlalchemy
-from flask import flash, redirect, request
+from flask import current_app, flash, redirect, request
 from flask_babel import gettext
 from importlib_metadata import version
 from sqlalchemy import and_
@@ -35,6 +36,30 @@ from mycodo.utils.system_pi import (add_custom_measurements, add_custom_units,
 from mycodo.utils.widgets import parse_widget_information
 
 logger = logging.getLogger(__name__)
+
+
+def daemon_background_task(flask_app, target, description, *args, **kwargs):
+    """Run a DaemonControl task on a background thread.
+
+    The callable is executed within an application context to ensure access
+    to configuration and logging while keeping Flask request threads free.
+    """
+
+    def _runner():
+        with flask_app.app_context():
+            try:
+                result = target(*args, **kwargs)
+                if isinstance(result, (list, tuple)) and len(result) >= 2:
+                    if result[0]:
+                        logger.error("%s failed: %s", description, result[1])
+                    else:
+                        logger.info("%s: %s", description, result[1])
+            except Exception:
+                logger.exception("Error while %s", description)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    return thread
 
 #
 # Custom options
@@ -556,16 +581,25 @@ def controller_activate_deactivate(messages,
 
     try:
         if not messages["error"]:
-            control = DaemonControl(pyro_timeout=60)
-            if controller_action == 'activate':
-                return_values = control.controller_activate(controller_id)
-            else:
-                return_values = control.controller_deactivate(controller_id)
+            flask_app = current_app._get_current_object()
+            daemon_background_task(
+                flask_app,
+                (lambda action, cid: DaemonControl(pyro_timeout=60)
+                 .controller_activate(cid) if action == 'activate'
+                 else DaemonControl(pyro_timeout=60)
+                 .controller_deactivate(cid)),
+                description=("activating" if activated else "deactivating") +
+                f" {controller_type} {controller_id}",
+                action=controller_action,
+                cid=controller_id,
+            )
             if flash_message:
-                if return_values[0]:
-                    messages["error"].append(return_values[1])
+                if activated:
+                    messages["success"].append(
+                        gettext("Controller activation requested."))
                 else:
-                    messages["success"].append(return_values[1])
+                    messages["success"].append(
+                        gettext("Controller deactivation requested."))
     except Exception as except_msg:
         messages["error"].append(
             '{}: {}'.format(TRANSLATIONS['error']['title'], except_msg))

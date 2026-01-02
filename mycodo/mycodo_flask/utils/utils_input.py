@@ -22,7 +22,8 @@ from mycodo.databases.models import PID
 from mycodo.mycodo_client import DaemonControl
 from mycodo.mycodo_flask.extensions import db
 from mycodo.mycodo_flask.utils import utils_measurement
-from mycodo.mycodo_flask.utils.utils_general import controller_activate_deactivate
+from mycodo.mycodo_flask.utils.utils_general import (
+    controller_activate_deactivate, daemon_background_task)
 from mycodo.mycodo_flask.utils.utils_general import custom_channel_options_return_json
 from mycodo.mycodo_flask.utils.utils_general import custom_options_return_json
 from mycodo.mycodo_flask.utils.utils_general import delete_entry_with_id
@@ -847,19 +848,24 @@ def force_acquire_measurements(unique_id):
         mod_input = Input.query.filter(
             Input.unique_id == unique_id).first()
 
+        if not mod_input:
+            messages["error"].append(gettext("Input not found."))
+            return messages
+
         if not mod_input.is_activated:
             messages["error"].append(gettext(
                 "Activate controller before attempting to force the acquisition of measurements"))
 
         if not messages["error"]:
-            control = DaemonControl()
-            status = control.input_force_measurements(unique_id)
-            if status[0]:
-                messages["error"].append(f"Force Input Measurement: {status[1]}")
-            else:
-                messages["success"].append(
-                    f"{gettext('Force Measurements')}, {TRANSLATIONS['input']['title']}")
-                flash(f"Force Input Measurement: {status[1]}", "success")
+            flask_app = current_app._get_current_object()
+            daemon_background_task(
+                flask_app,
+                lambda uid: DaemonControl().input_force_measurements(uid),
+                gettext("Force Input Measurement"),
+                unique_id,
+            )
+            messages["success"].append(
+                gettext("Force measurement request queued."))
     except Exception as except_msg:
         messages["error"].append(str(except_msg))
 
